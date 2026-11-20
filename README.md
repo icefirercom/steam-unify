@@ -88,6 +88,7 @@ powershell -ExecutionPolicy Bypass -File build_exe.ps1
 
 - 旧版 Steam：`appcache/appinfo.vdf`（v29）。
 - 新版 Steam：`appcache/appinfo/appinfo_XX.vdf` 分片（v30），程序会同步索引偏移、数据大小和 CRC32。
+- 兼容新出现的 81 字节索引记录及 4 字节索引前缀/后缀；单个无法识别的分片会跳过并记录警告，不会让整个扫描失败。
 - 分类写入 `userdata/<account>/config/cloudstorage/cloud-storage-namespace-1.json` 的 Steam 收藏集记录。
 - 状态保存在 `data/state.json`；`orig_name`、`orig_localized` 用于一键复原；所有分类最多 3 个。
 

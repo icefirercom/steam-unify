@@ -118,6 +118,7 @@ def scan(
     env: steamenv.SteamEnv,
     include_software: bool = False,
     all_known: bool = False,
+    warnings: list[str] | None = None,
 ) -> list[GameInfo]:
     """Return games owned/installed by the active account.
 
@@ -140,6 +141,8 @@ def scan(
     ai = None
     if env.has_shards:
         shards = ShardSet.load(env.shard_dir)
+        if warnings is not None:
+            warnings.extend(shards.warnings)
         all_ids = set(shards.appids)
     elif env.appinfo.is_file():
         ai = appinfo.AppInfo.load(env.appinfo)

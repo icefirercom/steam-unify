@@ -20,6 +20,8 @@ from steam_zh.state import State
 def cmd_scan() -> int:
     settings = State.load_settings()
     ctx = service.load_context(settings)
+    for warning in getattr(ctx, "warnings", []):
+        print(f"warning: {warning}", file=sys.stderr)
     for g in ctx.games:
         rec = ctx.state.get_app(g.appid)
         print(

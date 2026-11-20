@@ -440,6 +440,8 @@ class SteamZhApp:
                 f"已拥有 {sum(1 for g in self.ctx.games if g.owned)}，"
                 f"已安装 {sum(1 for g in self.ctx.games if g.installed)}"
             )
+            for warning in getattr(self.ctx, "warnings", [])[:5]:
+                self._append_log(f"缓存警告：{warning}")
             self.update_status()
             self._maybe_auto_translate_new()
         elif name == "auto_new_translate":

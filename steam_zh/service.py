@@ -23,6 +23,7 @@ class Context:
     include_software: bool = False
     all_known: bool = False
     new_appids: set[int] = field(default_factory=set)
+    warnings: list[str] = field(default_factory=list)
 
 
 def make_env(settings: dict) -> steamenv.SteamEnv:
@@ -47,10 +48,12 @@ def load_context(settings: dict) -> Context:
         st.data["collections"] = {}
         st.save()
     st.data["account"] = env.account
+    scan_warnings: list[str] = []
     games = metadata.scan(
         env,
         include_software=bool(settings.get("include_software")),
         all_known=bool(settings.get("all_known")),
+        warnings=scan_warnings,
     )
     ctx = Context(
         env=env,
@@ -59,6 +62,7 @@ def load_context(settings: dict) -> Context:
         include_software=bool(settings.get("include_software")),
         all_known=bool(settings.get("all_known")),
         new_appids={g.appid for g in games if str(g.appid) not in existing_ids},
+        warnings=scan_warnings,
     )
     merge_state(ctx)
     st.save()

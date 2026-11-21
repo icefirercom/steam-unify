@@ -5,11 +5,24 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from . import apply, categories, category_batch, category_model, category_state, metadata, paths, scoring, steamenv, translate, undo
+from . import (
+    apply,
+    categories,
+    category_batch,
+    category_model,
+    category_state,
+    dictionary,
+    metadata,
+    paths,
+    scoring,
+    steamenv,
+    translate,
+    undo,
+)
 from .metadata import GameInfo
-from .state import State
+from .state import State, now_ts
 
 BASE_DIR = paths.app_dir()
 DATA_DIR = paths.data_dir()
@@ -22,15 +35,18 @@ class Context:
     games: list[GameInfo]
     include_software: bool = False
     all_known: bool = False
+    filter_non_games: bool = True
     new_appids: set[int] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
+    filtered_items: list[tuple[int, str, str]] = field(default_factory=list)
 
 
-def make_env(settings: dict) -> steamenv.SteamEnv:
+def make_env(settings: dict, *, check: bool = True) -> steamenv.SteamEnv:
     root = steamenv.detect_root(settings.get("steam_root") or None)
     account = steamenv.detect_account(root, settings.get("account") or None)
     env = steamenv.SteamEnv(root, account)
-    env.check()
+    if check:
+        env.check()
     return env
 
 
@@ -49,20 +65,28 @@ def load_context(settings: dict) -> Context:
         st.save()
     st.data["account"] = env.account
     scan_warnings: list[str] = []
+    filtered_items: list[tuple[int, str, str]] = []
+    include_software = bool(settings.get("include_software"))
+    all_known = bool(settings.get("all_known", False))
+    filter_non_games = bool(settings.get("filter_non_games", True))
     games = metadata.scan(
         env,
-        include_software=bool(settings.get("include_software")),
-        all_known=bool(settings.get("all_known")),
+        include_software=include_software,
+        all_known=all_known,
         warnings=scan_warnings,
+        filter_non_games=filter_non_games,
+        filtered_out=filtered_items,
     )
     ctx = Context(
         env=env,
         state=st,
         games=games,
-        include_software=bool(settings.get("include_software")),
-        all_known=bool(settings.get("all_known")),
+        include_software=include_software,
+        all_known=all_known,
+        filter_non_games=filter_non_games,
         new_appids={g.appid for g in games if str(g.appid) not in existing_ids},
         warnings=scan_warnings,
+        filtered_items=filtered_items,
     )
     merge_state(ctx)
     st.save()
@@ -111,16 +135,16 @@ def merge_state(ctx: Context) -> None:
 def auto_categorize(ctx: Context) -> dict[int, str]:
     _attach_originals(ctx)
     results = scoring.classify_all(ctx.games)
-    changed = 0
     for g in ctx.games:
+        if ctx.state.is_ignored(g.appid):
+            continue
         rec = ctx.state.get_app(g.appid)
         if rec.get("category_locked"):
             continue
         res = results.get(g.appid)
         if not res:
             continue
-        old = tuple(category_state.get_categories(rec))
-        cats = category_state.set_categories(
+        category_state.set_categories(
             rec,
             res.categories,
             source="auto",
@@ -128,8 +152,6 @@ def auto_categorize(ctx: Context) -> dict[int, str]:
             reasons=res.reasons,
             locked=False,
         )
-        if tuple(cats) != old:
-            changed += 1
     ctx.state.save()
     return {g.appid: (results[g.appid].primary if g.appid in results else "其他") for g in ctx.games}
 
@@ -154,6 +176,11 @@ def auto_translate(
     progress: Callable[[int, int, str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     games: list[GameInfo] | None = None,
+    *,
+    settings: dict[str, Any] | None = None,
+    force: bool = False,
+    on_item: Callable[[int, dict[str, Any]], None] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> dict[int, str]:
     return translate.translate_games(
         games if games is not None else ctx.games,
@@ -162,7 +189,95 @@ def auto_translate(
         proxy=proxy,
         progress=progress,
         should_stop=should_stop,
+        options=settings,
+        force=force,
+        on_item=on_item,
+        log=log,
     )
+
+
+def ignore_games(ctx: Context, appids: set[int] | list[int], reason: str = "手动忽略") -> int:
+    by_id = {g.appid: g for g in ctx.games}
+    count = 0
+    for aid in appids:
+        g = by_id.get(int(aid))
+        name = g.original_name or g.name if g else ""
+        ctx.state.ignore_app(int(aid), name=name, reason=reason)
+        count += 1
+    if count:
+        ctx.state.save()
+    return count
+
+
+def unignore_games(ctx: Context, appids: set[int] | list[int]) -> int:
+    count = 0
+    for aid in appids:
+        if ctx.state.unignore_app(int(aid)):
+            count += 1
+    if count:
+        ctx.state.save()
+    return count
+
+
+def import_dictionary(
+    ctx: Context,
+    path: Path,
+    *,
+    apply_to_state: bool = True,
+) -> tuple[int, int]:
+    """Import custom Chinese names from JSON/CSV into user dictionary.
+
+    Returns ``(total_imported, applied_to_library)``.
+    """
+    total, entries = dictionary.import_file(path, merge_into_user=True)
+    matched = 0
+    if apply_to_state and entries:
+        lib_ids = {g.appid for g in ctx.games}
+        for aid_str, zh in entries.items():
+            if not aid_str.isdigit():
+                continue
+            aid = int(aid_str)
+            if aid not in lib_ids or ctx.state.is_ignored(aid):
+                continue
+            rec = ctx.state.get_app(aid)
+            if rec.get("locked") and rec.get("source") == "manual":
+                continue
+            rec["zh_name"] = zh
+            rec["source"] = "dictionary"
+            rec["detail"] = "用户词典"
+            rec["error"] = ""
+            rec["translated_at"] = now_ts()
+            matched += 1
+        if matched:
+            ctx.state.save()
+    return total, matched
+
+
+def export_dictionary(
+    ctx: Context,
+    path: Path,
+    *,
+    only_manual: bool = False,
+) -> int:
+    """Export library translations (or only manual/user entries) to JSON or CSV."""
+    mapping: dict[str, str] = {}
+    orig_names: dict[str, str] = {}
+    user_dict = dictionary.load_user()
+    if not only_manual:
+        mapping.update(user_dict)
+    for g in ctx.games:
+        if ctx.state.is_ignored(g.appid):
+            continue
+        rec = ctx.state.get_app(g.appid)
+        zh = str(rec.get("zh_name") or "").strip()
+        src = str(rec.get("source") or "")
+        orig_names[str(g.appid)] = str(rec.get("orig_name") or g.name)
+        if not zh or src == "original":
+            continue
+        if only_manual and src != "manual":
+            continue
+        mapping[str(g.appid)] = zh
+    return dictionary.export_file(path, mapping, orig_names=orig_names)
 
 
 def reset_undo_names(ctx: Context, log: Callable[[str], None] | None = None) -> int:
@@ -213,17 +328,24 @@ def reset_undo_categories(ctx: Context, log: Callable[[str], None] | None = None
 
 def counts(ctx: Context) -> dict[str, int]:
     out = {
-        "total": len(ctx.games),
+        "total": 0,
         "installed": 0,
         "official": 0,
         "dictionary": 0,
-        "machine": 0,
+        "wikidata": 0,
         "steam": 0,
+        "llm": 0,
+        "machine": 0,
         "manual": 0,
         "missing": 0,
         "applied": 0,
+        "ignored": 0,
     }
     for g in ctx.games:
+        if ctx.state.is_ignored(g.appid):
+            out["ignored"] += 1
+            continue
+        out["total"] += 1
         rec = ctx.state.get_app(g.appid)
         out["installed"] += 1 if g.installed else 0
         src = str(rec.get("source") or "")
@@ -243,20 +365,21 @@ def export_report(ctx: Context, path: Path) -> None:
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(
-            ["appid", "原名", "中文名", "来源", "分类", "已安装", "已拥有", "已应用", "备注"]
+            ["appid", "原名", "中文名", "来源", "分类", "已安装", "已拥有", "已应用", "已忽略", "备注"]
         )
         for g in ctx.games:
             rec = ctx.state.get_app(g.appid)
             w.writerow(
                 [
                     g.appid,
-                    g.name,
+                    str(rec.get("orig_name") or g.name),
                     rec.get("zh_name", ""),
                     rec.get("source", ""),
                     " / ".join(category_state.get_categories(rec)),
                     1 if g.installed else 0,
                     1 if g.owned else 0,
                     1 if rec.get("applied") else 0,
+                    1 if ctx.state.is_ignored(g.appid) else 0,
                     rec.get("error", "") or rec.get("detail", ""),
                 ]
             )
@@ -269,6 +392,10 @@ def do_apply(
     lock_appinfo: bool,
     progress: Callable[[str], None] | None = None,
     log: Callable[[str], None] | None = None,
+    *,
+    apply_names: bool = True,
+    apply_collections: bool = True,
+    backup_keep: int | None = None,
 ) -> apply.ApplyResult:
     return apply.apply_changes(
         ctx.env,
@@ -279,6 +406,9 @@ def do_apply(
         lock_appinfo=lock_appinfo,
         progress=progress,
         log=log,
+        apply_names=apply_names,
+        apply_collections=apply_collections,
+        backup_keep=backup_keep,
     )
 
 
@@ -302,17 +432,38 @@ def do_verify(
     ctx: Context,
     wait: float = 12.0,
     log: Callable[[str], None] | None = None,
+    *,
+    selected: set[int] | None = None,
+    apply_names: bool = True,
+    apply_collections: bool = True,
 ) -> apply.ApplyResult:
-    return apply.verify(ctx.env, ctx.state, ctx.games, wait=wait, log=log)
+    return apply.verify(
+        ctx.env,
+        ctx.state,
+        ctx.games,
+        wait=wait,
+        log=log,
+        selected=selected,
+        apply_names=apply_names,
+        apply_collections=apply_collections,
+    )
 
 
 def do_restore(
-    ctx: Context,
+    ctx: Context | None,
     backup_dir: Path,
     restart: bool = False,
     log: Callable[[str], None] | None = None,
+    *,
+    settings: dict | None = None,
 ) -> None:
-    apply.restore_backup(ctx.env, ctx.state, backup_dir, restart=restart, log=log)
+    if ctx is None:
+        env = make_env(settings or {}, check=False)
+        st = State.load()
+    else:
+        env = ctx.env
+        st = ctx.state
+    apply.restore_backup(env, st, backup_dir, restart=restart, log=log)
 
 
 def do_autofix(
@@ -320,6 +471,9 @@ def do_autofix(
     restart: bool = True,
     lock_appinfo: bool = False,
     log: Callable[[str], None] | None = None,
+    *,
+    apply_collections: bool = True,
+    backup_keep: int | None = None,
 ) -> apply.ApplyResult:
     return apply.autofix(
         ctx.env,
@@ -328,6 +482,8 @@ def do_autofix(
         restart=restart,
         lock_appinfo=lock_appinfo,
         log=log,
+        apply_collections=apply_collections,
+        backup_keep=backup_keep,
     )
 
 

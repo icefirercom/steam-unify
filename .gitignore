@@ -1,0 +1,23 @@
+# Runtime user state, secrets, and backups (NEVER commit)
+data/state.json
+data/state.v1.bak
+data/settings.json
+data/user_names.json
+data/descriptions.json
+data/*.tmp
+backups/
+
+# Python / build / IDE artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+build/
+build-onedir/
+dist/
+*.spec
+*.log
+.DS_Store
+Thumbs.db

@@ -15,17 +15,44 @@ STATE_PATH = DATA_DIR / "state.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 
+DEFAULT_SOURCE_ORDER: list[str] = [
+    "user_dict",
+    "official",
+    "bundled_dict",
+    "wikidata",
+    "steam_store",
+    "llm",
+    "google",
+    "youdao",
+    "mymemory",
+]
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "steam_root": "",
     "account": "",
     "use_network": True,
     "auto_translate_new": True,
     "proxy": "",
+    "use_system_proxy": True,
     "include_software": False,
-    "all_known": True,
+    "filter_non_games": True,
+    "all_known": False,
+    "apply_collections": True,
     "restart_steam": True,
     "lock_appinfo": False,
     "backup_keep": 10,
+    "concurrency": 6,
+    "enable_wikidata": True,
+    "enable_steam_store": True,
+    "enable_free_mt": True,
+    "llm_enabled": False,
+    "llm_base_url": "https://api.deepseek.com/v1",
+    "llm_api_key": "",
+    "llm_model": "deepseek-chat",
+    "llm_batch_size": 30,
+    "source_order": list(DEFAULT_SOURCE_ORDER),
+    "disabled_sources": [],
 }
 
 
@@ -53,9 +80,12 @@ class State:
         self.data.setdefault("version", 2)
         self.data.setdefault("apps", {})
         self.data.setdefault("collections", {})
+        self.data.setdefault("ignored", {})
         self.data.setdefault("settings", {})
         for key, value in DEFAULT_SETTINGS.items():
-            self.data["settings"].setdefault(key, value)
+            self.data["settings"].setdefault(
+                key, list(value) if isinstance(value, list) else value
+            )
 
     @classmethod
     def load(cls) -> "State":
@@ -73,8 +103,29 @@ class State:
         return self.data["collections"]
 
     @property
+    def ignored(self) -> dict[str, Any]:
+        val = self.data.setdefault("ignored", {})
+        if not isinstance(val, dict):
+            val = {}
+            self.data["ignored"] = val
+        return val
+
+    @property
     def settings(self) -> dict[str, Any]:
         return self.data["settings"]
+
+    def is_ignored(self, appid: int) -> bool:
+        return str(appid) in self.ignored
+
+    def ignore_app(self, appid: int, name: str = "", reason: str = "手动忽略") -> None:
+        self.ignored[str(appid)] = {
+            "name": str(name or ""),
+            "reason": str(reason or "手动忽略"),
+            "ts": now_ts(),
+        }
+
+    def unignore_app(self, appid: int) -> bool:
+        return self.ignored.pop(str(appid), None) is not None
 
     def get_app(self, appid: int) -> dict[str, Any]:
         return self.apps.setdefault(str(appid), {})
@@ -135,7 +186,10 @@ class State:
 
     @staticmethod
     def load_settings() -> dict[str, Any]:
-        data = dict(DEFAULT_SETTINGS)
+        data = {
+            k: (list(v) if isinstance(v, list) else v)
+            for k, v in DEFAULT_SETTINGS.items()
+        }
         data.update(_load(SETTINGS_PATH, {}))
         return data
 

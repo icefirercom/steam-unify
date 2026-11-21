@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import appinfo, descriptions, paths, steamenv
+from . import appinfo, descriptions, filters, packageinfo, paths, steamenv
 from .appinfo_shards import ShardSet
 
 
@@ -91,7 +91,15 @@ class GameInfo:
 
     @property
     def official_zh(self) -> str | None:
-        return self.localized.get("schinese") or self.localized.get("sc_schinese")
+        return (
+            self.localized.get("schinese")
+            or self.localized.get("sc_schinese")
+            or self.localized.get("chinese")
+        )
+
+    @property
+    def official_tchinese(self) -> str | None:
+        return self.localized.get("tchinese") or self.localized.get("tc_tchinese")
 
     @property
     def has_cjk(self) -> bool:
@@ -119,23 +127,31 @@ def scan(
     include_software: bool = False,
     all_known: bool = False,
     warnings: list[str] | None = None,
+    *,
+    filter_non_games: bool = True,
+    filtered_out: list[tuple[int, str, str]] | None = None,
 ) -> list[GameInfo]:
     """Return games owned/installed by the active account.
 
     all_known=True also includes every game-type app in the local appinfo cache
     (including Family-shared games that have no localconfig entry).
+    filter_non_games=True strips Steam runtimes, dedicated servers, SDKs,
+    benchmarks, soundtracks, and software-only entries even if tagged as Game.
     """
     installed = steamenv.installed_apps(env.root)
-    owned = steamenv.owned_appids(env)
+    owned_local = steamenv.owned_appids(env)
+    licensed = packageinfo.licensed_appids(
+        env.root,
+        env.account,
+        active_account_count=len(steamenv.list_accounts(env.root)),
+    )
+    favorites = steamenv.favorite_appids(env)
+    owned = owned_local | licensed | favorites
     tag_map = steamenv.tag_names(env)
     desc_cache = descriptions.load_cache()
     fallback = fallback_tag_names()
     for tid, name in fallback.items():
         tag_map.setdefault(tid, name)
-
-    wanted_types = {"game"}
-    if include_software:
-        wanted_types |= {"application", "tool"}
 
     shards = None
     ai = None
@@ -205,7 +221,17 @@ def scan(
             )
             localized = ai.get_localized(appid) or {}
 
-        if typ.lower() not in wanted_types:
+        reason = filters.classify_non_game(
+            appid,
+            name,
+            typ,
+            genre_ids,
+            include_software=include_software,
+            filter_non_games=filter_non_games,
+        )
+        if reason is not None:
+            if filtered_out is not None and (appid in owned or appid in installed or typ.lower() == "game"):
+                filtered_out.append((appid, name, reason))
             continue
         info = installed.get(appid)
         out.append(

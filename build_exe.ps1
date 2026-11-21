@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 # 需要 Python 3.10+；PyInstaller 只用于打包，运行时不需要 Python。
@@ -9,7 +9,12 @@ python -m PyInstaller `
     --noconfirm --clean --onedir --windowed `
     --name "Steam统译" `
     --icon "assets\steam_zh.ico" `
-    --add-data "data;data" `
+    --add-data "data\category_model.json;data" `
+    --add-data "data\category_overrides.json;data" `
+    --add-data "data\category_rules.json;data" `
+    --add-data "data\genres_zh.json;data" `
+    --add-data "data\official_names.json;data" `
+    --add-data "data\tag_names_zh.json;data" `
     --distpath "dist" `
     --workpath "build-onedir" `
     --specpath "." `

@@ -238,6 +238,7 @@ class AppInfo:
         entries: list[Entry],
         string_table_raw: bytes,
         keys: list[str],
+        entry_trailer: bytes = b"\x00\x00\x00\x00",
     ):
         self.path = Path(path)
         self.magic = magic
@@ -245,6 +246,7 @@ class AppInfo:
         self.entries = entries
         self.string_table_raw = string_table_raw
         self.keys = keys
+        self.entry_trailer = entry_trailer if entry_trailer else b"\x00\x00\x00\x00"
         self._key_index: dict[str, int] = {}
         for i, k in enumerate(keys):
             self._key_index.setdefault(k, i)
@@ -270,10 +272,13 @@ class AppInfo:
 
         entries: list[Entry] = []
         off = HEADER_SIZE
-        while off + 8 <= string_table_off:
-            appid, size = struct.unpack_from("<II", data, off)
-            if appid == 0 and size == 0:
+        while off + 4 <= string_table_off:
+            appid = struct.unpack_from("<I", data, off)[0]
+            if appid == 0:
                 break
+            if off + 8 > string_table_off:
+                raise AppInfoError(f"truncated entry header at 0x{off:x}")
+            size = struct.unpack_from("<I", data, off + 4)[0]
             if size < ENTRY_META_SIZE:
                 raise AppInfoError(
                     f"invalid entry size {size} for app {appid} at 0x{off:x}"
@@ -311,11 +316,9 @@ class AppInfo:
             )
             off += ENTRY_HEADER_SIZE + vdf_len
 
-        if off != string_table_off:
-            # Steam pads the entry area with zeroes in some builds.
-            pad = data[off:string_table_off]
-            if pad.strip(b"\x00"):
-                raise AppInfoError("entry area does not end at string table")
+        pad = data[off:string_table_off]
+        if pad.strip(b"\x00"):
+            raise AppInfoError("entry area does not end at string table")
 
         table = data[string_table_off:]
         if len(table) < 4:
@@ -330,7 +333,15 @@ class AppInfo:
             keys.append(table[pos:end].decode("utf-8", "replace"))
             pos = end + 1
 
-        obj = cls(path, magic, universe, entries, table, keys)
+        obj = cls(
+            path,
+            magic,
+            universe,
+            entries,
+            table,
+            keys,
+            entry_trailer=pad if pad else b"\x00\x00\x00\x00",
+        )
         if verify:
             obj.validate_roundtrip()
         return obj
@@ -474,12 +485,16 @@ class AppInfo:
                 + vdf
             )
             entry_blobs.append(blob)
-        new_table_off = HEADER_SIZE + sum(len(b) for b in entry_blobs)
+        trailer = self.entry_trailer if self.entry_trailer else b"\x00\x00\x00\x00"
+        new_table_off = HEADER_SIZE + sum(len(b) for b in entry_blobs) + len(trailer)
         out = (
             struct.pack("<IIQ", self.magic, self.universe, new_table_off)
             + b"".join(entry_blobs)
+            + trailer
             + self.string_table_raw
         )
+        if len(trailer) < 4 or out[new_table_off - 4 : new_table_off] != b"\x00\x00\x00\x00":
+            raise AppInfoError("missing 4-byte sentinel before string table")
         # Extra safety: the result must parse and every appid must be unchanged.
         check = AppInfo.from_bytes(out, self.path)
         if [e.appid for e in check.entries] != [e.appid for e in self.entries]:
@@ -488,6 +503,7 @@ class AppInfo:
 
     @classmethod
     def from_bytes(cls, data: bytes, path: Path) -> "AppInfo":
+        import shutil
         import tempfile
 
         # Reuse load() without touching the original file.
@@ -496,10 +512,7 @@ class AppInfo:
             tmp.write_bytes(data)
             return cls.load(tmp, verify=False)
         finally:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+            shutil.rmtree(tmp.parent, ignore_errors=True)
 
     def save(self, path: str | os.PathLike[str] | None = None) -> bytes:
         path = Path(path) if path is not None else self.path

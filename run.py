@@ -30,7 +30,12 @@ def cmd_scan() -> int:
             f"{' / '.join(category_state.get_categories(rec))}"
         )
     c = service.counts(ctx)
-    print(f"# total={c['total']} missing={c['missing']} applied={c['applied']}", file=sys.stderr)
+    filtered_n = len(getattr(ctx, "filtered_items", []))
+    print(
+        f"# total={c['total']} missing={c['missing']} applied={c['applied']} "
+        f"filtered_non_games={filtered_n} ignored={c['ignored']}",
+        file=sys.stderr,
+    )
     return 0
 
 
@@ -41,6 +46,8 @@ def cmd_autofix() -> int:
         ctx,
         restart=bool(settings.get("restart_steam", True)),
         lock_appinfo=bool(settings.get("lock_appinfo")),
+        apply_collections=bool(settings.get("apply_collections", True)),
+        backup_keep=int(settings.get("backup_keep", 10)),
         log=lambda m: print(m, file=sys.stderr),
     )
     print(f"applied={res.names_applied} collections={res.collections_changed}", file=sys.stderr)

@@ -147,6 +147,10 @@ class SteamEnv:
         return self.root / "appcache" / "appinfo"
 
     @property
+    def packageinfo(self) -> Path:
+        return self.root / "appcache" / "packageinfo.vdf"
+
+    @property
     def has_shards(self) -> bool:
         d = self.shard_dir
         return d.is_dir() and any(d.glob("appinfo_*.vdf"))
@@ -162,6 +166,10 @@ class SteamEnv:
     @property
     def localconfig(self) -> Path:
         return self.config / "localconfig.vdf"
+
+    @property
+    def licensecache(self) -> Path:
+        return self.config / "licensecache"
 
     @property
     def cloudstorage(self) -> Path:
@@ -183,7 +191,10 @@ class SteamEnv:
         if not self.exe.is_file():
             raise SteamError(f"找不到 {self.exe}")
         if not self.appinfo.is_file() and not self.has_shards:
-            raise SteamError(f"找不到 {self.appinfo} 或分片缓存 {self.shard_dir}")
+            raise SteamError(
+                f"找不到 {self.appinfo} 或分片缓存 {self.shard_dir}\n\n"
+                "可先点“更多操作 → 从备份还原”恢复备份的 appinfo.vdf，或完全退出再重新启动一次 Steam 让其重新生成缓存。"
+            )
         if not self.localconfig.is_file():
             raise SteamError(f"找不到 {self.localconfig}")
         if not self.namespace_file.is_file():
@@ -358,6 +369,33 @@ def owned_appids(env: SteamEnv) -> set[int]:
     for key in apps:
         if str(key).isdigit():
             result.add(int(key))
+    return result
+
+
+def favorite_appids(env: SteamEnv) -> set[int]:
+    """Return AppIDs in the user's Steam Favorites collection."""
+    result: set[int] = set()
+    try:
+        raw = json.loads(env.namespace_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return result
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and item[0] == "user-collections.favorite"
+            and isinstance(item[1], dict)
+            and not item[1].get("is_deleted")
+        ):
+            try:
+                val = json.loads(str(item[1].get("value") or "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for aid in val.get("added", []):
+                if str(aid).isdigit():
+                    result.add(int(aid))
     return result
 
 
